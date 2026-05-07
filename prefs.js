@@ -429,6 +429,24 @@ export default class RemindMePreferences extends ExtensionPreferences {
     });
     window.add(customPage);
 
+    const notificationGroup = new Adw.PreferencesGroup({
+      title: _("Notifications"),
+      description: _("Control how reminder alerts are delivered"),
+    });
+    customPage.add(notificationGroup);
+
+    const soundRow = new Adw.SwitchRow({
+      title: _("Play reminder sound"),
+      subtitle: _("Play a sound when a reminder notification appears"),
+    });
+    settings.bind(
+      "notification-sound",
+      soundRow,
+      "active",
+      Gio.SettingsBindFlags.DEFAULT,
+    );
+    notificationGroup.add(soundRow);
+
     const customGroup = new Adw.PreferencesGroup({
       title: _("Custom Reminders"),
       description: _("Create your own reminders with custom text and intervals"),
@@ -576,7 +594,9 @@ export default class RemindMePreferences extends ExtensionPreferences {
     });
     const enabledSwitch = new Gtk.Switch({
       active: current?.enabled ?? true,
+      halign: Gtk.Align.START,
       valign: Gtk.Align.CENTER,
+      hexpand: false,
     });
 
     grid.attach(

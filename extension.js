@@ -38,12 +38,12 @@ const REMINDER_TEMPLATES = {
 export default class RemindMeExtension extends Extension {
     enable() {
         this._settings = new SettingsManager(this.getSettings('org.gnome.shell.extensions.remindme'));
-        const soundFilePath = GLib.build_filenamev([this.path, 'assets', 'sounds', 'iphone_alarm.mp3']);
+        const appIconPath = GLib.build_filenamev([this.path, 'assets', 'icons', '4777604.png']);
         this._notifier = new Notifier({
             onSnooze: id => this._handleSnooze(id),
             onDone: id => this._handleDone(id),
             onNotification: () => this._markNotificationUnread(),
-            soundFilePath,
+            appIconPath,
             shouldPlaySound: () => this._settings?.getBoolean('notification-sound') ?? true,
         });
         this._scheduler = new Scheduler(this._notifier);
@@ -171,6 +171,10 @@ export default class RemindMeExtension extends Extension {
         this._indicator.menu.addMenuItem(this._upcomingPrayerItem);
 
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const addReminderItem = new PopupMenu.PopupMenuItem(_('Add Reminder'));
+        addReminderItem.connect('activate', () => this.openPreferences());
+        this._indicator.menu.addMenuItem(addReminderItem);
 
         const openPrefsItem = new PopupMenu.PopupMenuItem(_('Open Preferences'));
         openPrefsItem.connect('activate', () => this.openPreferences());
