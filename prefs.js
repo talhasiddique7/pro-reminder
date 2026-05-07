@@ -1,16 +1,34 @@
 import Adw from "gi://Adw";
 import Gio from "gi://Gio";
 import GLib from "gi://GLib";
-import GObject from "gi://GObject";
 import Gtk from "gi://Gtk";
 import {
   ExtensionPreferences,
   gettext as _,
 } from "resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js";
 
+const PRAYER_DEFINITIONS = [
+  { key: "fajr", name: "Fajr", emoji: "🌅" },
+  { key: "dhuhr", name: "Dhuhr", emoji: "☀️" },
+  { key: "asr", name: "Asr", emoji: "🌤️" },
+  { key: "maghrib", name: "Maghrib", emoji: "🌆" },
+  { key: "isha", name: "Isha", emoji: "🌙" },
+];
+
+const DEFAULT_PRAYER_TIMES = {
+  fajr: "05:00",
+  dhuhr: "13:15",
+  asr: "16:45",
+  maghrib: "18:35",
+  isha: "20:00",
+};
+
 export default class RemindMePreferences extends ExtensionPreferences {
   fillPreferencesWindow(window) {
     const settings = this.getSettings("org.gnome.shell.extensions.remindme");
+    window.set_default_size(980, 720);
+    window.set_size_request(820, 620);
+    window.search_enabled = false;
 
     this._buildPrayerPage(window, settings);
     this._buildWaterPage(window, settings);
@@ -44,49 +62,258 @@ export default class RemindMePreferences extends ExtensionPreferences {
     prayerGroup.add(prayerEnabledRow);
 
     prayerGroup.add(new Adw.ActionRow({
-      title: _("Prayer Times"),
+      title: _("Prayer List"),
       subtitle: _("🌅 Fajr • ☀️ Dhuhr • 🌤️ Asr • 🌆 Maghrib • 🌙 Isha"),
     }));
 
-    const latRow = new Adw.SpinRow({
-      title: _("Latitude"),
-      subtitle: _("Location latitude (-90 to 90)"),
-      adjustment: new Gtk.Adjustment({
-        lower: -90,
-        upper: 90,
-        step_increment: 0.0001,
-        page_increment: 1,
-      }),
-      digits: 4,
+    const currentPrayerRow = new Adw.ActionRow({
+      title: _("Current Prayer"),
+      subtitle: _("Detecting..."),
     });
-    settings.bind("prayer-lat", latRow, "value", Gio.SettingsBindFlags.DEFAULT);
-    prayerEnabledRow.bind_property(
-      "active",
-      latRow,
-      "sensitive",
-      GObject.BindingFlags.SYNC_CREATE,
-    );
-    prayerGroup.add(latRow);
+    prayerGroup.add(currentPrayerRow);
 
-    const lonRow = new Adw.SpinRow({
-      title: _("Longitude"),
-      subtitle: _("Location longitude (-180 to 180)"),
-      adjustment: new Gtk.Adjustment({
-        lower: -180,
-        upper: 180,
-        step_increment: 0.0001,
-        page_increment: 1,
-      }),
-      digits: 4,
+    const upcomingPrayerRow = new Adw.ActionRow({
+      title: _("Upcoming Prayer"),
+      subtitle: _("Detecting..."),
     });
-    settings.bind("prayer-lon", lonRow, "value", Gio.SettingsBindFlags.DEFAULT);
-    prayerEnabledRow.bind_property(
-      "active",
-      lonRow,
-      "sensitive",
-      GObject.BindingFlags.SYNC_CREATE,
+    prayerGroup.add(upcomingPrayerRow);
+
+    const prayerTimesGroup = new Adw.PreferencesGroup({
+      title: _("Prayer Times"),
+      description: _("Fixed times are shown below. Use Edit to change any prayer time."),
+    });
+    prayerPage.add(prayerTimesGroup);
+
+    const editPrayerTimesButton = new Gtk.Button({
+      label: _("Edit"),
+      valign: Gtk.Align.CENTER,
+    });
+    editPrayerTimesButton.connect("clicked", () => {
+      this._showPrayerTimesDialog(window, settings);
+    });
+    prayerTimesGroup.set_header_suffix(editPrayerTimesButton);
+
+    const prayerRows = new Map();
+    for (const prayer of PRAYER_DEFINITIONS) {
+      const row = new Adw.ActionRow({
+        title: `${prayer.emoji} ${_(prayer.name)}`,
+        subtitle: "",
+      });
+      prayerTimesGroup.add(row);
+      prayerRows.set(prayer.key, row);
+    }
+
+    const setPrayerControlsSensitive = () => {
+      const enabled = prayerEnabledRow.active;
+      currentPrayerRow.set_sensitive(enabled);
+      upcomingPrayerRow.set_sensitive(enabled);
+      editPrayerTimesButton.set_sensitive(enabled);
+      for (const row of prayerRows.values())
+        row.set_sensitive(enabled);
+    };
+    prayerEnabledRow.connect("notify::active", setPrayerControlsSensitive);
+    setPrayerControlsSensitive();
+
+    const refreshPrayerRows = () => {
+      const prayerTimes = this._getPrayerTimes(settings);
+      for (const prayer of PRAYER_DEFINITIONS) {
+        const row = prayerRows.get(prayer.key);
+        if (row)
+          row.subtitle = prayerTimes[prayer.key];
+      }
+
+      const status = this._computePrayerStatus(prayerTimes);
+      currentPrayerRow.subtitle = status.current;
+      upcomingPrayerRow.subtitle = status.upcoming;
+    };
+
+    settings.connect("changed::prayer-times", refreshPrayerRows);
+    refreshPrayerRows();
+
+    const prayerStatusTimerId = GLib.timeout_add_seconds(
+      GLib.PRIORITY_DEFAULT,
+      30,
+      () => {
+        refreshPrayerRows();
+        return GLib.SOURCE_CONTINUE;
+      },
     );
-    prayerGroup.add(lonRow);
+    window.connect("close-request", () => {
+      GLib.Source.remove(prayerStatusTimerId);
+      return false;
+    });
+  }
+
+  _showPrayerTimesDialog(window, settings) {
+    const currentTimes = this._getPrayerTimes(settings);
+    const dialog = new Gtk.Dialog({
+      title: _("Edit Prayer Times"),
+      modal: true,
+      transient_for: window,
+      default_width: 460,
+      default_height: 320,
+      resizable: false,
+    });
+    const cancelButton = dialog.add_button(_("Cancel"), Gtk.ResponseType.CANCEL);
+    cancelButton.add_css_class("flat");
+    const saveButton = dialog.add_button(_("Save"), Gtk.ResponseType.OK);
+    saveButton.add_css_class("suggested-action");
+    dialog.set_default_response(Gtk.ResponseType.OK);
+
+    const content = dialog.get_content_area();
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+
+    const grid = new Gtk.Grid({
+      row_spacing: 12,
+      column_spacing: 12,
+      hexpand: true,
+      vexpand: true,
+    });
+    content.append(grid);
+
+    const entries = new Map();
+    PRAYER_DEFINITIONS.forEach((prayer, index) => {
+      grid.attach(
+        new Gtk.Label({
+          label: `${prayer.emoji} ${_(prayer.name)}`,
+          halign: Gtk.Align.START,
+        }),
+        0,
+        index,
+        1,
+        1,
+      );
+
+      const entry = new Gtk.Entry({
+        text: currentTimes[prayer.key],
+        placeholder_text: _("HH:MM"),
+        hexpand: true,
+      });
+      grid.attach(entry, 1, index, 1, 1);
+      entries.set(prayer.key, entry);
+    });
+
+    dialog.connect("response", (dlg, response) => {
+      if (response === Gtk.ResponseType.OK) {
+        const updated = {};
+        for (const prayer of PRAYER_DEFINITIONS) {
+          const value = entries.get(prayer.key)?.get_text().trim() ?? "";
+          if (!this._isValidPrayerTime(value)) {
+            this._showPrayerTimeError(window, prayer.name);
+            return;
+          }
+          updated[prayer.key] = value;
+        }
+        this._setPrayerTimes(settings, updated);
+      }
+      dlg.destroy();
+    });
+
+    dialog.present();
+  }
+
+  _showPrayerTimeError(window, prayerName) {
+    const errorDialog = new Gtk.MessageDialog({
+      transient_for: window,
+      modal: true,
+      buttons: Gtk.ButtonsType.OK,
+      message_type: Gtk.MessageType.ERROR,
+      text: _("Invalid time for %s").format(_(prayerName)),
+      secondary_text: _("Use HH:MM format, for example 05:00 or 18:35."),
+    });
+    errorDialog.connect("response", (dialog) => dialog.destroy());
+    errorDialog.present();
+  }
+
+  _isValidPrayerTime(value) {
+    return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
+  }
+
+  _getPrayerTimes(settings) {
+    const raw = settings.get_string("prayer-times");
+    if (!raw)
+      return { ...DEFAULT_PRAYER_TIMES };
+
+    try {
+      const parsed = JSON.parse(raw);
+      const times = { ...DEFAULT_PRAYER_TIMES };
+      for (const prayer of PRAYER_DEFINITIONS) {
+        const value = String(parsed?.[prayer.key] ?? "").trim();
+        times[prayer.key] = this._isValidPrayerTime(value)
+          ? value
+          : DEFAULT_PRAYER_TIMES[prayer.key];
+      }
+      return times;
+    } catch (e) {
+      logError(e, "Invalid prayer-times JSON");
+      return { ...DEFAULT_PRAYER_TIMES };
+    }
+  }
+
+  _setPrayerTimes(settings, times) {
+    settings.set_string("prayer-times", JSON.stringify(times));
+  }
+
+  _computePrayerStatus(prayerTimes) {
+    const now = GLib.DateTime.new_now_local();
+    const slots = PRAYER_DEFINITIONS.map((prayer) => ({
+      ...prayer,
+      time: prayerTimes[prayer.key],
+      datetime: this._prayerDateTimeFromHHMM(prayerTimes[prayer.key], 0),
+    })).filter((slot) => slot.datetime !== null);
+
+    if (slots.length === 0) {
+      return {
+        current: _("No prayer times configured"),
+        upcoming: _("No prayer times configured"),
+      };
+    }
+
+    let upcoming = slots.find((slot) => now.compare(slot.datetime) < 0) ?? null;
+    if (!upcoming) {
+      const firstPrayer = PRAYER_DEFINITIONS[0];
+      upcoming = {
+        ...firstPrayer,
+        time: prayerTimes[firstPrayer.key],
+        datetime: this._prayerDateTimeFromHHMM(prayerTimes[firstPrayer.key], 1),
+      };
+    }
+
+    let current = null;
+    for (let i = slots.length - 1; i >= 0; i -= 1) {
+      if (now.compare(slots[i].datetime) >= 0) {
+        current = slots[i];
+        break;
+      }
+    }
+    if (!current)
+      current = slots[slots.length - 1];
+
+    return {
+      current: `${current.emoji} ${_(current.name)} (${current.time})`,
+      upcoming: `${upcoming.emoji} ${_(upcoming.name)} (${upcoming.time})`,
+    };
+  }
+
+  _prayerDateTimeFromHHMM(time, dayOffset) {
+    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time ?? "");
+    if (!match)
+      return null;
+
+    const hours = Number.parseInt(match[1], 10);
+    const minutes = Number.parseInt(match[2], 10);
+    const base = GLib.DateTime.new_now_local().add_days(dayOffset);
+    return GLib.DateTime.new_local(
+      base.get_year(),
+      base.get_month(),
+      base.get_day_of_month(),
+      hours,
+      minutes,
+      0,
+    );
   }
 
   _buildWaterPage(window, settings) {
@@ -448,31 +675,51 @@ export default class RemindMePreferences extends ExtensionPreferences {
 
     const metadata = this.metadata ?? {};
     const extensionName = metadata.name ?? "RemindMe";
-    const version = metadata.version ?? "N/A";
+    const description = String(metadata.description ?? "").trim();
+    const version = this._formatVersion(metadata);
     const homepage = metadata.url ?? "";
-    const maintainer = this._extractMaintainerFromUrl(homepage);
+    const maintainer = this._extractMaintainer(metadata, homepage);
+    const releaseNotesText = this._extractReleaseNotes(metadata);
 
-    const infoGroup = new Adw.PreferencesGroup({
+    const brandingGroup = new Adw.PreferencesGroup();
+    aboutPage.add(brandingGroup);
+
+    const brandingRow = new Adw.ActionRow({
       title: extensionName,
-      description: _("Maintained by %s").format(maintainer),
-    });
-    aboutPage.add(infoGroup);
-
-    const iconRow = new Adw.ActionRow({
-      title: extensionName,
-      subtitle: _("Official icon"),
+      subtitle: description || _("Prayer, Water, and Break reminders for GNOME Shell"),
+      activatable: false,
+      selectable: false,
     });
 
-    const iconPath = GLib.build_filenamev([this.path, "assets", "icons", "4777604.png"]);
-    const iconImage = Gtk.Image.new_from_file(iconPath);
-    iconImage.set_pixel_size(36);
-    iconImage.set_valign(Gtk.Align.CENTER);
-    iconRow.add_prefix(iconImage);
-    infoGroup.add(iconRow);
+    const logoPath = GLib.build_filenamev([this.path, "assets", "icons", "4777604.png"]);
+    const logo = GLib.file_test(logoPath, GLib.FileTest.EXISTS)
+      ? new Gtk.Image({
+          gicon: new Gio.FileIcon({ file: Gio.File.new_for_path(logoPath) }),
+          pixel_size: 56,
+          valign: Gtk.Align.CENTER,
+        })
+      : new Gtk.Image({
+          icon_name: "appointment-soon-symbolic",
+          pixel_size: 56,
+          valign: Gtk.Align.CENTER,
+        });
 
-    infoGroup.add(new Adw.ActionRow({
-      title: _("Version"),
-      subtitle: `${version}`,
+    const versionLabel = new Gtk.Label({
+      label: _("Version %s").format(version),
+      valign: Gtk.Align.CENTER,
+    });
+    versionLabel.add_css_class("caption");
+    versionLabel.add_css_class("dim-label");
+
+    brandingRow.add_prefix(logo);
+    brandingRow.add_suffix(versionLabel);
+    brandingGroup.add(brandingRow);
+
+    const detailsGroup = new Adw.PreferencesGroup();
+    aboutPage.add(detailsGroup);
+    detailsGroup.add(new Adw.ActionRow({
+      title: _("Maintainer"),
+      subtitle: maintainer,
     }));
 
     const releaseNotes = new Adw.ExpanderRow({
@@ -481,20 +728,40 @@ export default class RemindMePreferences extends ExtensionPreferences {
     });
     releaseNotes.add_row(new Adw.ActionRow({
       title: _("Current release"),
-      subtitle: _("Custom reminders with add/edit/delete, improved break controls, and tray menu actions."),
+      subtitle: releaseNotesText,
     }));
-    infoGroup.add(releaseNotes);
+    detailsGroup.add(releaseNotes);
 
     const linksGroup = new Adw.PreferencesGroup({
-      title: _("Links"),
+      title: _("Quick Links"),
     });
     aboutPage.add(linksGroup);
 
     if (homepage) {
-      linksGroup.add(this._createLinkRow(_("Extension listing"), _("Open"), homepage));
-      linksGroup.add(this._createLinkRow(_("Source code"), _("GitHub"), homepage));
-      linksGroup.add(this._createLinkRow(_("Report an issue"), _("Issues"), `${homepage}/issues`));
-      linksGroup.add(this._createLinkRow(_("Contributors"), _("Contributor graph"), `${homepage}/graphs/contributors`));
+      linksGroup.add(this._createLinkRow(
+        _("Read me"),
+        _("Project page"),
+        homepage,
+        "text-x-generic-symbolic",
+      ));
+      linksGroup.add(this._createLinkRow(
+        _("Report an issue"),
+        _("Issues"),
+        `${homepage}/issues`,
+        "tools-check-spelling-symbolic",
+      ));
+      linksGroup.add(this._createLinkRow(
+        _("View source on GitHub"),
+        _("Source code"),
+        homepage,
+        "web-browser-symbolic",
+      ));
+      linksGroup.add(this._createLinkRow(
+        _("Contributors"),
+        _("Contributor graph"),
+        `${homepage}/graphs/contributors`,
+        "system-users-symbolic",
+      ));
     } else {
       linksGroup.add(new Adw.ActionRow({
         title: _("No external links configured"),
@@ -503,13 +770,17 @@ export default class RemindMePreferences extends ExtensionPreferences {
     }
   }
 
-  _createLinkRow(title, subtitle, url) {
+  _createLinkRow(title, subtitle, url, iconName = "adw-external-link-symbolic") {
     const row = new Adw.ActionRow({
       title,
       subtitle,
       activatable: true,
     });
 
+    row.add_prefix(new Gtk.Image({
+      icon_name: iconName,
+      valign: Gtk.Align.CENTER,
+    }));
     const linkIcon = new Gtk.Image({
       icon_name: "adw-external-link-symbolic",
       valign: Gtk.Align.CENTER,
@@ -539,5 +810,43 @@ export default class RemindMePreferences extends ExtensionPreferences {
       return match[1];
 
     return this.metadata?.uuid ?? "Unknown";
+  }
+
+  _extractMaintainer(metadata, homepage) {
+    const developerName = String(
+      metadata?.["developer-name"] ?? metadata?.developer_name ?? "",
+    ).trim();
+    if (developerName)
+      return developerName;
+
+    return this._extractMaintainerFromUrl(homepage);
+  }
+
+  _formatVersion(metadata) {
+    const versionNumber = metadata?.version;
+    const versionName = String(
+      metadata?.["version-name"] ?? metadata?.version_name ?? "",
+    ).trim();
+
+    if (versionName && String(versionNumber ?? "").trim() && versionName !== String(versionNumber))
+      return `${versionName} (${versionNumber})`;
+
+    if (versionName)
+      return versionName;
+
+    if (versionNumber === 0 || versionNumber)
+      return String(versionNumber);
+
+    return "N/A";
+  }
+
+  _extractReleaseNotes(metadata) {
+    const releaseNotes = String(
+      metadata?.["release-notes"] ?? metadata?.release_notes ?? "",
+    ).trim();
+    if (releaseNotes)
+      return releaseNotes;
+
+    return _("Custom reminders with add/edit/delete, improved break controls, and tray menu actions.");
   }
 }

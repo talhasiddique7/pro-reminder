@@ -1,6 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
+import Clutter from 'gi://Clutter';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
@@ -9,46 +10,53 @@ import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/
 import { SettingsManager } from './lib/settings.js';
 import { Notifier } from './lib/notifier.js';
 import { Scheduler } from './lib/scheduler.js';
-import { PrayerEngine } from './lib/adhan-port.js';
 
-// Prayer template definitions with emojis
 const PRAYER_TEMPLATES = {
-    fajr: { name: 'Fajr', emoji: '🌅', offset: 0 },
-    dhuhr: { name: 'Dhuhr', emoji: '☀️', offset: 1 },
-    asr: { name: 'Asr', emoji: '🌤️', offset: 2 },
-    maghrib: { name: 'Maghrib', emoji: '🌆', offset: 3 },
-    isha: { name: 'Isha', emoji: '🌙', offset: 4 },
+    fajr: { name: 'Fajr', emoji: '🌅' },
+    dhuhr: { name: 'Dhuhr', emoji: '☀️' },
+    asr: { name: 'Asr', emoji: '🌤️' },
+    maghrib: { name: 'Maghrib', emoji: '🌆' },
+    isha: { name: 'Isha', emoji: '🌙' },
 };
+
 const PRAYER_ORDER = ['fajr', 'dhuhr', 'asr', 'maghrib', 'isha'];
+
+const DEFAULT_PRAYER_TIMES = {
+    fajr: '05:00',
+    dhuhr: '13:15',
+    asr: '16:45',
+    maghrib: '18:35',
+    isha: '20:00',
+};
 
 const REMINDER_TEMPLATES = {
     water: { title: '💧 Water Reminder', body: 'Time to drink water and stay hydrated!' },
     break: { title: '⏸️ Break Reminder', body: 'Take a moment to stretch and rest your eyes!' },
-    prayer: { title: '🕌 Prayer Time', body: 'It\'s time for {prayer}' },
+    prayer: { title: '🕌 Prayer Time', body: "It's time for {prayer}" },
 };
 
 export default class RemindMeExtension extends Extension {
     enable() {
         this._settings = new SettingsManager(this.getSettings('org.gnome.shell.extensions.remindme'));
+        const soundFilePath = GLib.build_filenamev([this.path, 'assets', 'sounds', 'iphone_alarm.mp3']);
         this._notifier = new Notifier({
             onSnooze: id => this._handleSnooze(id),
             onDone: id => this._handleDone(id),
+            onNotification: () => this._markNotificationUnread(),
+            soundFilePath,
+            shouldPlaySound: () => this._settings?.getBoolean('notification-sound') ?? true,
         });
         this._scheduler = new Scheduler(this._notifier);
-        
+
         this._setupIndicator();
-        
-        // Initial setup of reminders
+
         this._updateReminders();
-        
-        // Listen for setting changes
+
         this._settingsHandlers = [
             this._settings.connect('prayer-enabled', () => this._updateReminders()),
+            this._settings.connect('prayer-times', () => this._updateReminders()),
             this._settings.connect('water-enabled', () => this._updateReminders()),
             this._settings.connect('break-enabled', () => this._updateReminders()),
-            this._settings.connect('prayer-lat', () => this._updateReminders()),
-            this._settings.connect('prayer-lon', () => this._updateReminders()),
-            this._settings.connect('prayer-method', () => this._updateReminders()),
             this._settings.connect('water-interval', () => this._updateReminders()),
             this._settings.connect('break-interval', () => this._updateReminders()),
             this._settings.connect('break-duration', () => this._updateReminders()),
@@ -56,12 +64,21 @@ export default class RemindMeExtension extends Extension {
         ];
 
         this._scheduler.start();
+        this._indicatorRefreshId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 30, () => {
+            this._updateIndicatorStatus();
+            return GLib.SOURCE_CONTINUE;
+        });
     }
 
     disable() {
         this._scheduler?.stop();
         this._notifier?.destroy();
-        
+
+        if (this._indicatorRefreshId) {
+            GLib.Source.remove(this._indicatorRefreshId);
+            this._indicatorRefreshId = null;
+        }
+
         if (this._settingsHandlers) {
             this._settingsHandlers.forEach(h => this._settings.disconnect(h));
             this._settingsHandlers = null;
@@ -71,11 +88,11 @@ export default class RemindMeExtension extends Extension {
             try {
                 this._indicator.destroy();
             } catch (e) {
-                // Ignore errors
+                // Ignore errors while shutting down
             }
             this._indicator = null;
         }
-        
+
         this._settings = null;
         this._notifier = null;
         this._scheduler = null;
@@ -83,16 +100,48 @@ export default class RemindMeExtension extends Extension {
 
     _setupIndicator() {
         try {
-            if (!this._indicator) {
-                this._indicator = new PanelMenu.Button(0.5, 'RemindMe', false);
-                const icon = new St.Icon({
-                    icon_name: 'appointment-soon-symbolic',
-                    style_class: 'system-status-icon',
-                });
-                this._indicator.add_child(icon);
-                this._buildIndicatorMenu();
-                Main.panel.addToStatusArea(this.uuid, this._indicator);
-            }
+            if (this._indicator)
+                return;
+
+            this._indicator = new PanelMenu.Button(0.5, 'RemindMe', false);
+
+            const iconPath = GLib.build_filenamev([this.path, 'assets', 'icons', '4777604.png']);
+            const fileIcon = Gio.icon_new_for_string(iconPath);
+            this._mainIcon = new St.Icon({
+                gicon: fileIcon,
+                fallback_icon_name: 'appointment-soon-symbolic',
+                style_class: 'system-status-icon',
+                icon_size: 20,
+            });
+            this._reminderDot = new St.Widget({
+                visible: false,
+                x_align: Clutter.ActorAlign.END,
+                y_align: Clutter.ActorAlign.START,
+                style: 'background-color: #facc15; min-width: 7px; min-height: 7px; border-radius: 99px; border: 1px solid rgba(0, 0, 0, 0.35); margin-top: 1px;',
+            });
+
+            this._iconContainer = new St.Widget({
+                layout_manager: new Clutter.BinLayout(),
+                x_expand: false,
+                y_expand: false,
+            });
+            this._iconContainer.add_child(this._mainIcon);
+            this._iconContainer.add_child(this._reminderDot);
+
+            this._indicator.add_child(this._iconContainer);
+            this._panelText = new St.Label({
+                text: _('No events'),
+                style_class: 'panel-label',
+            });
+            this._panelText.set_style('max-width: 220px; padding-left: 6px;');
+            this._indicator.add_child(this._panelText);
+
+            this._buildIndicatorMenu();
+            this._indicator.menu.connect('open-state-changed', (_menu, isOpen) => {
+                if (isOpen)
+                    this._markNotificationRead();
+            });
+            Main.panel.addToStatusArea(this.uuid, this._indicator);
         } catch (e) {
             console.error('Error setting up indicator:', e);
         }
@@ -105,6 +154,22 @@ export default class RemindMeExtension extends Extension {
             reactive: false,
         });
         this._indicator.menu.addMenuItem(this._statusItem);
+
+        this._upcomingReminderItem = new PopupMenu.PopupMenuItem(_('Upcoming reminder: none'), {
+            reactive: false,
+        });
+        this._indicator.menu.addMenuItem(this._upcomingReminderItem);
+
+        this._currentPrayerItem = new PopupMenu.PopupMenuItem(_('Current prayer: not available'), {
+            reactive: false,
+        });
+        this._indicator.menu.addMenuItem(this._currentPrayerItem);
+
+        this._upcomingPrayerItem = new PopupMenu.PopupMenuItem(_('Next prayer: not available'), {
+            reactive: false,
+        });
+        this._indicator.menu.addMenuItem(this._upcomingPrayerItem);
+
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const openPrefsItem = new PopupMenu.PopupMenuItem(_('Open Preferences'));
@@ -117,31 +182,114 @@ export default class RemindMeExtension extends Extension {
     }
 
     _handleSnooze(id) {
-        console.log(`Snoozing reminder: ${id}`);
-        // Add 15 minutes to the next trigger
         const nextTrigger = GLib.DateTime.new_now_local().add_minutes(15);
         const reminder = this._scheduler._reminders.get(id);
-        if (reminder) {
+        if (reminder)
             reminder.nextTrigger = nextTrigger;
-        }
+
+        this._updateIndicatorStatus();
     }
 
     _handleDone(id) {
-        console.log(`Reminder done: ${id}`);
-        // Recalculate next trigger normally
         const reminder = this._scheduler._reminders.get(id);
-        if (reminder && reminder.recalculate) {
+        if (reminder && reminder.recalculate)
             reminder.nextTrigger = reminder.recalculate();
+
+        this._updateIndicatorStatus();
+    }
+
+    _formatPrayerName(key) {
+        const prayer = PRAYER_TEMPLATES[key];
+        if (!prayer)
+            return key;
+
+        return `${prayer.emoji} ${prayer.name}`;
+    }
+
+    _getPrayerTimes() {
+        const raw = this._settings.getString('prayer-times');
+        if (!raw)
+            return { ...DEFAULT_PRAYER_TIMES };
+
+        try {
+            const parsed = JSON.parse(raw);
+            const times = { ...DEFAULT_PRAYER_TIMES };
+            for (const prayer of PRAYER_ORDER) {
+                const value = String(parsed?.[prayer] ?? '').trim();
+                times[prayer] = this._isValidPrayerTime(value)
+                    ? value
+                    : DEFAULT_PRAYER_TIMES[prayer];
+            }
+            return times;
+        } catch (e) {
+            console.error('Invalid prayer-times JSON:', e);
+            return { ...DEFAULT_PRAYER_TIMES };
         }
     }
 
-    _formatPrayerName(name) {
-        const lower = name.toLowerCase();
-        const template = PRAYER_TEMPLATES[lower];
-        if (template) {
-            return `${template.emoji} ${template.name}`;
+    _isValidPrayerTime(value) {
+        return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
+    }
+
+    _buildPrayerDateTime(prayerTimes, prayerKey, dayOffset = 0) {
+        const time = prayerTimes[prayerKey] ?? '';
+        const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
+        if (!match)
+            return null;
+
+        const hours = Number.parseInt(match[1], 10);
+        const minutes = Number.parseInt(match[2], 10);
+        const date = GLib.DateTime.new_now_local().add_days(dayOffset);
+        return GLib.DateTime.new_local(
+            date.get_year(),
+            date.get_month(),
+            date.get_day_of_month(),
+            hours,
+            minutes,
+            0,
+        );
+    }
+
+    _getPrayerStatus() {
+        const now = GLib.DateTime.new_now_local();
+        const prayerTimes = this._getPrayerTimes();
+        const entries = PRAYER_ORDER.map(key => ({
+            key,
+            time: prayerTimes[key],
+            datetime: this._buildPrayerDateTime(prayerTimes, key, 0),
+        })).filter(entry => entry.datetime !== null);
+
+        if (entries.length === 0)
+            return null;
+
+        let upcoming = entries.find(entry => now.compare(entry.datetime) < 0) ?? null;
+        if (!upcoming) {
+            const first = PRAYER_ORDER[0];
+            upcoming = {
+                key: first,
+                time: prayerTimes[first],
+                datetime: this._buildPrayerDateTime(prayerTimes, first, 1),
+            };
         }
-        return name;
+
+        let current = null;
+        for (let i = entries.length - 1; i >= 0; i -= 1) {
+            if (now.compare(entries[i].datetime) >= 0) {
+                current = entries[i];
+                break;
+            }
+        }
+        if (!current)
+            current = entries[entries.length - 1];
+
+        return { current, upcoming };
+    }
+
+    _formatTime(dateTime) {
+        if (!dateTime)
+            return '--:--';
+
+        return dateTime.format('%R');
     }
 
     _getCustomReminders() {
@@ -170,109 +318,89 @@ export default class RemindMeExtension extends Extension {
     }
 
     _updateIndicatorStatus() {
-        if (!this._statusItem)
+        if (!this._statusItem || !this._upcomingReminderItem || !this._currentPrayerItem || !this._upcomingPrayerItem)
             return;
 
-        const reminders = [...this._scheduler.getReminders().values()];
+        const reminders = [...this._scheduler.getReminders().entries()]
+            .map(([id, reminder]) => ({ id, ...reminder }));
+
         if (reminders.length === 0) {
             this._statusItem.label.text = _('No reminders scheduled');
+            this._upcomingReminderItem.label.text = _('Upcoming reminder: none');
+            this._setPanelText(_('No events'));
+        } else {
+            const next = reminders
+                .filter(reminder => reminder.nextTrigger)
+                .sort((a, b) => a.nextTrigger.compare(b.nextTrigger))[0];
+
+            this._statusItem.label.text = _('%d active reminders').format(reminders.length);
+            if (next) {
+                this._upcomingReminderItem.label.text = `${_('Upcoming reminder')}: ${next.title} (${this._formatTime(next.nextTrigger)})`;
+                this._setPanelText(`${next.title}`);
+            } else {
+                this._upcomingReminderItem.label.text = _('Upcoming reminder: none');
+                this._setPanelText(_('No events'));
+            }
+        }
+
+        if (!this._settings.getBoolean('prayer-enabled')) {
+            this._currentPrayerItem.label.text = _('Current prayer: disabled');
+            this._upcomingPrayerItem.label.text = _('Next prayer: disabled');
             return;
         }
 
-        const next = reminders
-            .filter(r => r.nextTrigger)
-            .sort((a, b) => a.nextTrigger.compare(b.nextTrigger))[0];
-
-        if (!next) {
-            this._statusItem.label.text = _('No upcoming reminders');
+        const prayerStatus = this._getPrayerStatus();
+        if (!prayerStatus) {
+            this._currentPrayerItem.label.text = _('Current prayer: not available');
+            this._upcomingPrayerItem.label.text = _('Next prayer: not available');
             return;
         }
 
-        this._statusItem.label.text = _('%d active reminders').format(reminders.length);
+        this._currentPrayerItem.label.text = `${_('Current prayer')}: ${this._formatPrayerName(prayerStatus.current.key)} (${prayerStatus.current.time})`;
+        this._upcomingPrayerItem.label.text = `${_('Next prayer')}: ${this._formatPrayerName(prayerStatus.upcoming.key)} (${prayerStatus.upcoming.time})`;
     }
 
     _updateReminders() {
         this._scheduler.clearReminders();
 
-        // Prayer Reminders
         if (this._settings.getBoolean('prayer-enabled')) {
-            const lat = this._settings.getDouble('prayer-lat');
-            const lon = this._settings.getDouble('prayer-lon');
-            const method = this._settings.getString('prayer-method');
-            const engine = new PrayerEngine(lat, lon, method);
-            
-            const schedulePrayer = () => {
-                const times = engine.getTimes();
-                const now = GLib.DateTime.new_now_local();
-                
-                // Find next prayer
-                let next = null;
-                let nextName = '';
-                
-                for (const name of PRAYER_ORDER) {
-                    const date = times[name];
-                    if (!date)
-                        continue;
+            const getNextPrayer = () => {
+                const status = this._getPrayerStatus();
+                if (!status)
+                    return { next: null, key: '' };
 
-                    const gdate = GLib.DateTime.new_from_unix_local(date.getTime() / 1000);
-                    if (now.compare(gdate) < 0) {
-                        if (!next || gdate.compare(next) < 0) {
-                            next = gdate;
-                            nextName = name;
-                        }
-                    }
-                }
-
-                // If all prayers passed, get tomorrow's
-                if (!next) {
-                    const tomorrow = new Date();
-                    tomorrow.setDate(tomorrow.getDate() + 1);
-                    const tomorrowTimes = engine.getTimes(tomorrow);
-                    for (const name of PRAYER_ORDER) {
-                        const date = tomorrowTimes[name];
-                        if (!date)
-                            continue;
-
-                        next = GLib.DateTime.new_from_unix_local(date.getTime() / 1000);
-                        nextName = name;
-                        break;
-                    }
-                }
-
-                return { next, name: nextName };
+                return { next: status.upcoming.datetime, key: status.upcoming.key };
             };
 
-            const initial = schedulePrayer();
-            const formattedName = this._formatPrayerName(initial.name);
-            this._scheduler.setReminder('prayer', {
+            const initial = getNextPrayer();
+            const prayerReminder = {
                 title: REMINDER_TEMPLATES.prayer.title,
-                body: `It's time for ${formattedName} prayer`,
+                body: `It's time for ${this._formatPrayerName(initial.key)} prayer`,
                 nextTrigger: initial.next,
                 recalculate: () => {
-                    const { next, name } = schedulePrayer();
-                    const formatted = this._formatPrayerName(name);
-                    this._notifier.show('prayer', REMINDER_TEMPLATES.prayer.title, 
-                        `It's time for ${formatted} prayer`);
-                    return next;
-                }
-            });
+                    const nextPrayer = getNextPrayer();
+                    prayerReminder.body = `It's time for ${this._formatPrayerName(nextPrayer.key)} prayer`;
+                    return nextPrayer.next;
+                },
+                icon: 'appointment-soon-symbolic',
+            };
+
+            this._scheduler.setReminder('prayer', prayerReminder);
         }
 
-        // Water Reminders
         if (this._settings.getBoolean('water-enabled')) {
             const interval = Math.max(1, this._settings.getInt('water-interval'));
             const recalculate = () => GLib.DateTime.new_now_local().add_minutes(interval);
-            
+
             this._scheduler.setReminder('water', {
                 title: REMINDER_TEMPLATES.water.title,
                 body: REMINDER_TEMPLATES.water.body,
                 nextTrigger: recalculate(),
                 recalculate,
-                icon: 'water-symbolic'
+                icon: 'water-symbolic',
             });
         }
 
-        // Break Reminders
         if (this._settings.getBoolean('break-enabled')) {
             const interval = Math.max(1, this._settings.getInt('break-interval'));
             const breakDuration = Math.max(1, this._settings.getInt('break-duration'));
@@ -283,7 +411,7 @@ export default class RemindMeExtension extends Extension {
                 body: _('Take a %d minute break to stretch and rest your eyes!').format(breakDuration),
                 nextTrigger: recalculate(),
                 recalculate,
-                icon: 'timer-symbolic'
+                icon: 'timer-symbolic',
             });
         }
 
@@ -306,5 +434,27 @@ export default class RemindMeExtension extends Extension {
 
         this._scheduler.tickNow();
         this._updateIndicatorStatus();
+    }
+
+    _setPanelText(text) {
+        if (!this._panelText)
+            return;
+
+        this._panelText.text = text && text.length ? text : _('No events');
+    }
+
+    _setReminderDotVisible(visible) {
+        if (!this._reminderDot)
+            return;
+
+        this._reminderDot.visible = Boolean(visible);
+    }
+
+    _markNotificationUnread() {
+        this._setReminderDotVisible(true);
+    }
+
+    _markNotificationRead() {
+        this._setReminderDotVisible(false);
     }
 }

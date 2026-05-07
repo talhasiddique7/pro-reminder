@@ -1,5 +1,6 @@
 {
   "name": "Reminder Pro",
+  "developer-name": "talhasiddique7",
   "description": "Prayer, Water, and Break reminders for GNOME Shell",
   "uuid": "reminder-pro@talhasiddique7",
   "shell-version": [
@@ -12,5 +13,6 @@
     "50.1"
   ],
   "version": 1,
+  "release-notes": "Custom reminders with add/edit/delete, improved break controls, and tray menu actions.",
   "url": "https://github.com/talhasiddique7/pro-reminder"
 }
