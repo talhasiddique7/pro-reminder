@@ -19,6 +19,7 @@ const PRAYER_TEMPLATES = {
     maghrib: { name: 'Maghrib', emoji: '🌆', offset: 3 },
     isha: { name: 'Isha', emoji: '🌙', offset: 4 },
 };
+const PRAYER_ORDER = ['fajr', 'dhuhr', 'asr', 'maghrib', 'isha'];
 
 const REMINDER_TEMPLATES = {
     water: { title: '💧 Water Reminder', body: 'Time to drink water and stay hydrated!' },
@@ -51,7 +52,6 @@ export default class RemindMeExtension extends Extension {
             this._settings.connect('water-interval', () => this._updateReminders()),
             this._settings.connect('break-interval', () => this._updateReminders()),
             this._settings.connect('break-duration', () => this._updateReminders()),
-            this._settings.connect('prayer-template', () => this._updateReminders()),
             this._settings.connect('custom-reminders', () => this._updateReminders()),
         ];
 
@@ -209,7 +209,11 @@ export default class RemindMeExtension extends Extension {
                 let next = null;
                 let nextName = '';
                 
-                for (const [name, date] of Object.entries(times)) {
+                for (const name of PRAYER_ORDER) {
+                    const date = times[name];
+                    if (!date)
+                        continue;
+
                     const gdate = GLib.DateTime.new_from_unix_local(date.getTime() / 1000);
                     if (now.compare(gdate) < 0) {
                         if (!next || gdate.compare(next) < 0) {
@@ -224,9 +228,15 @@ export default class RemindMeExtension extends Extension {
                     const tomorrow = new Date();
                     tomorrow.setDate(tomorrow.getDate() + 1);
                     const tomorrowTimes = engine.getTimes(tomorrow);
-                    const first = Object.entries(tomorrowTimes).reduce((a, b) => a[1] < b[1] ? a : b);
-                    next = GLib.DateTime.new_from_unix_local(first[1].getTime() / 1000);
-                    nextName = first[0];
+                    for (const name of PRAYER_ORDER) {
+                        const date = tomorrowTimes[name];
+                        if (!date)
+                            continue;
+
+                        next = GLib.DateTime.new_from_unix_local(date.getTime() / 1000);
+                        nextName = name;
+                        break;
+                    }
                 }
 
                 return { next, name: nextName };
@@ -294,6 +304,7 @@ export default class RemindMeExtension extends Extension {
             });
         }
 
+        this._scheduler.tickNow();
         this._updateIndicatorStatus();
     }
 }

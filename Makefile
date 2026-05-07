@@ -1,6 +1,6 @@
 # Reminder Pro Makefile
 
-UUID = remindme@user.github.io
+UUID = reminder-pro@talhasiddique7
 SCHEMA = org.gnome.shell.extensions.remindme.gschema.xml
 EXTENSION_PATH = $(HOME)/.local/share/gnome-shell/extensions/$(UUID)
 

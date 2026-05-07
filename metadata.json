@@ -1,14 +1,16 @@
 {
-  "name": "RemindMe",
+  "name": "Reminder Pro",
   "description": "Prayer, Water, and Break reminders for GNOME Shell",
-  "uuid": "remindme@user.github.io",
+  "uuid": "reminder-pro@talhasiddique7",
   "shell-version": [
     "45",
     "46",
     "47",
     "48",
     "49",
-    "50"
+    "50",
+    "50.1"
   ],
-  "url": "https://github.com/user/reminder-pro"
+  "version": 1,
+  "url": "https://github.com/talhasiddique7/pro-reminder"
 }
